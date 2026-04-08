@@ -2,7 +2,7 @@
 // GET /api/completed-orders?limit=1000&offset=0&sort=date-desc&service_id=123
 // Returns completed orders with pagination support
 
-const BASE_URL = "https://bulkprovider.com/adminapi/v2";
+const BASE_URL = "https://mothersmm.com/adminapi/v2";
 const API_KEY  = process.env.BULKPROVIDER_API_KEY;
 
 export default async function handler(req, res) {
