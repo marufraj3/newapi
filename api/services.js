@@ -1,56 +1,33 @@
 // api/services.js
-// GET /api/services
-// GET /api/services?category=instagram
-// GET /api/services?category=facebook+followers
-// GET /api/services?verified=true
+// GET /api/services?page=1
+// GET /api/services?page=2&category=instagram
+// GET /api/services?page=1&verified=true
 // GET /api/services?id=14316
 //
-// Builds service stats from last 90 days of orders (up to 5000 orders).
-// Uses multiple pages but with a hard cap to avoid Vercel timeout.
+// Per page: 1000 orders fetched, service stats built from that page
+// Frontend loads page by page and merges results
 
 const BASE_URL = "https://mothersmm.com/adminapi/v2";
 const API_KEY  = process.env.BULKPROVIDER_API_KEY;
 
-async function fetchRecentOrders() {
+async function fetchOrdersPage(offset, limit) {
   const now            = Math.floor(Date.now() / 1000);
   const ninetyDaysAgo = now - 90 * 24 * 60 * 60;
 
-  let allOrders = [];
-  const limit   = 1000;
-  const maxPages = 5; // max 5000 orders — enough for accurate stats, won't timeout
+  const params = new URLSearchParams({
+    created_from: ninetyDaysAgo,
+    created_to:   now,
+    limit,
+    offset,
+    sort: 'date-desc',
+  });
 
-  for (let page = 0; page < maxPages; page++) {
-    const params = new URLSearchParams({
-      created_from: ninetyDaysAgo,
-      created_to:   now,
-      limit,
-      offset:       page * limit,
-      sort:         'date-desc',
-    });
+  const res = await fetch(`${BASE_URL}/orders?${params}`, {
+    headers: { 'X-Api-Key': API_KEY, 'Content-Type': 'application/json' },
+  });
 
-    try {
-      const res = await fetch(`${BASE_URL}/orders?${params}`, {
-        headers: { 'X-Api-Key': API_KEY, 'Content-Type': 'application/json' },
-      });
-
-      if (!res.ok) break;
-      const data = await res.json();
-      const list = data?.data?.list || [];
-      if (list.length === 0) break;
-
-      allOrders = allOrders.concat(list);
-
-      const total = data.pagination?.total ?? 0;
-      if (allOrders.length >= total || list.length < limit) break;
-
-      // Rate limit safety
-      await new Promise(r => setTimeout(r, 200));
-    } catch (e) {
-      break;
-    }
-  }
-
-  return allOrders;
+  if (!res.ok) throw new Error(`Upstream error ${res.status}`);
+  return res.json();
 }
 
 function buildServiceStats(orders) {
@@ -81,7 +58,7 @@ function buildServiceStats(orders) {
     else if (status === 'error')     s.error     += 1;
   }
 
-  const services = Object.values(map).map(s => {
+  return Object.values(map).map(s => {
     const completion_rate = s.total > 0
       ? parseFloat(((s.completed / s.total) * 100).toFixed(1)) : 0;
     const cancel_rate = s.total > 0
@@ -102,10 +79,7 @@ function buildServiceStats(orders) {
       completed: s.completed, canceled: s.canceled,
       partial: s.partial, total: s.total, total_qty: s.total_qty,
     };
-  });
-
-  services.sort((a, b) => b.score - a.score);
-  return services;
+  }).sort((a, b) => b.score - a.score);
 }
 
 export default async function handler(req, res) {
@@ -116,11 +90,27 @@ export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed.' });
 
   try {
-    const { category, verified, id } = req.query;
+    const {
+      page     = 1,
+      category = '',
+      verified = '',
+      id       = '',
+    } = req.query;
 
-    const orders  = await fetchRecentOrders();
-    let services  = buildServiceStats(orders);
+    const pageNum   = Math.max(1, parseInt(page));
+    const limit     = 1000;
+    const offset    = (pageNum - 1) * limit;
 
+    // Fetch this page of orders from BulkProvider
+    const data        = await fetchOrdersPage(offset, limit);
+    const orders      = data?.data?.list || [];
+    const totalOrders = data?.pagination?.total ?? 0;
+    const totalPages  = Math.ceil(totalOrders / limit);
+
+    // Build service stats from this page's orders
+    let services = buildServiceStats(orders);
+
+    // Apply filters
     if (id) {
       services = services.filter(s => String(s.id) === String(id));
     }
@@ -139,10 +129,20 @@ export default async function handler(req, res) {
     const verified_count = services.filter(s => s.verified).length;
 
     return res.status(200).json({
-      success:        true,
-      period:         'last_90_days',
-      generated_at:   new Date().toISOString(),
+      success:         true,
+      period:          'last_90_days',
+      generated_at:    new Date().toISOString(),
       orders_analyzed: orders.length,
+      pagination: {
+        current_page:  pageNum,
+        per_page:      limit,
+        total_orders:  totalOrders,
+        total_pages:   totalPages,
+        has_next:      pageNum < totalPages,
+        has_prev:      pageNum > 1,
+        next_page:     pageNum < totalPages ? pageNum + 1 : null,
+        prev_page:     pageNum > 1 ? pageNum - 1 : null,
+      },
       total:          services.length,
       verified_count,
       services,
