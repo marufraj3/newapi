@@ -1,7 +1,3 @@
-// api/orders.js
-// GET /api/orders
-// Returns all orders from last 90 days grouped by status with average processing time
-
 import {
   fetchAllOrders,
   calculateAverageTime,
@@ -9,17 +5,12 @@ import {
   groupByStatus,
 } from "../lib/bulkprovider.js";
 
-if (req.method === 'OPTIONS') {
+export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Api-Key');
-  return res.status(200).end();
-}
 
-res.setHeader('Access-Control-Allow-Origin', '*');
-export default async function handler(req, res) {
-  // Handle CORS preflight
-  if (req.method === "OPTIONS") {
+  if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
 
@@ -28,28 +19,12 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Optional query param: ?status=pending (filter single status)
     const { status: filterStatus } = req.query;
-
-    // Fetch all orders from last 90 days
     const allOrders = await fetchAllOrders();
-
-    // Group by status
     const grouped = groupByStatus(allOrders);
 
-    // All possible statuses
-    const allStatuses = [
-      "pending",
-      "in_progress",
-      "processing",
-      "completed",
-      "partial",
-      "canceled",
-      "error",
-      "fail",
-    ];
+    const allStatuses = ["pending","in_progress","processing","completed","partial","canceled","error","fail"];
 
-    // Build per-status summary
     const statusSummary = {};
     for (const s of allStatuses) {
       const orders = grouped[s] || [];
@@ -61,16 +36,9 @@ export default async function handler(req, res) {
       };
     }
 
-    // Overall stats
     const overallAvgSeconds = calculateAverageTime(allOrders);
+    let orderList = filterStatus ? (grouped[filterStatus] || []) : allOrders;
 
-    // Build final order list (filtered or all)
-    let orderList = allOrders;
-    if (filterStatus) {
-      orderList = grouped[filterStatus] || [];
-    }
-
-    // Map orders to clean response shape
     const orders = orderList.map((o) => ({
       id: o.id,
       status: o.status,
@@ -84,14 +52,10 @@ export default async function handler(req, res) {
       created_timestamp: o.created_timestamp,
       last_update: o.last_update,
       last_update_timestamp: o.last_update_timestamp,
-      processing_time_seconds:
-        o.last_update_timestamp && o.created_timestamp
-          ? o.last_update_timestamp - o.created_timestamp
-          : null,
-      processing_time_human:
-        o.last_update_timestamp && o.created_timestamp
-          ? formatDuration(o.last_update_timestamp - o.created_timestamp)
-          : "N/A",
+      processing_time_seconds: o.last_update_timestamp && o.created_timestamp
+        ? o.last_update_timestamp - o.created_timestamp : null,
+      processing_time_human: o.last_update_timestamp && o.created_timestamp
+        ? formatDuration(o.last_update_timestamp - o.created_timestamp) : "N/A",
       charge: o.charge,
       mode: o.mode,
       creation_type: o.creation_type,
@@ -114,9 +78,6 @@ export default async function handler(req, res) {
     });
   } catch (err) {
     console.error("Orders API Error:", err.message);
-    return res.status(500).json({
-      success: false,
-      error: err.message,
-    });
+    return res.status(500).json({ success: false, error: err.message });
   }
 }
