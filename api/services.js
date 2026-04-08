@@ -8,7 +8,7 @@
 // Builds service stats from last 90 days of orders data.
 // "verified" = completion_rate >= 80% AND at least 5 total orders
 
-const BASE_URL = "https://bulkprovider.com/adminapi/v2";
+const BASE_URL = "https://mothersmm.com/adminapi/v2";
 const API_KEY  = process.env.BULKPROVIDER_API_KEY;
 
 async function fetchAllOrders() {
