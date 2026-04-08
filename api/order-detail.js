@@ -2,7 +2,7 @@
 // GET /api/order-detail?id=12345
 // Returns single order detail — used for processing time calculation
 
-const BASE_URL = "https://bulkprovider.com/adminapi/v2";
+const BASE_URL = "https://mothersmm.com/adminapi/v2";
 const API_KEY  = process.env.BULKPROVIDER_API_KEY;
 
 export default async function handler(req, res) {
