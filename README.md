@@ -44,7 +44,7 @@ vercel --prod
 1. Go to **vercel.com → Your Project → Settings → Environment Variables**
 2. Add:
    - **Name**: `BULKPROVIDER_API_KEY`
-   - **Value**: `96fwbo1ptr0b9icjxnwzfht6qzs4jmkehkep121kmwo1t0ber1eqiak11fh3bkb4`
+   - **Value**: `api key`
    - **Environment**: Production, Preview, Development
 
 ---
