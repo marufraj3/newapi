@@ -5,46 +5,49 @@
 // GET /api/services?verified=true
 // GET /api/services?id=14316
 //
-// Builds service stats from last 90 days of orders data.
-// "verified" = completion_rate >= 80% AND at least 5 total orders
+// Builds service stats from last 90 days of orders (up to 5000 orders).
+// Uses multiple pages but with a hard cap to avoid Vercel timeout.
 
 const BASE_URL = "https://mothersmm.com/adminapi/v2";
 const API_KEY  = process.env.BULKPROVIDER_API_KEY;
 
-async function fetchAllOrders() {
-  const now           = Math.floor(Date.now() / 1000);
+async function fetchRecentOrders() {
+  const now            = Math.floor(Date.now() / 1000);
   const ninetyDaysAgo = now - 90 * 24 * 60 * 60;
 
   let allOrders = [];
-  let offset    = 0;
   const limit   = 1000;
+  const maxPages = 5; // max 5000 orders — enough for accurate stats, won't timeout
 
-  while (true) {
+  for (let page = 0; page < maxPages; page++) {
     const params = new URLSearchParams({
       created_from: ninetyDaysAgo,
       created_to:   now,
       limit,
-      offset,
-      sort: 'date-desc',
+      offset:       page * limit,
+      sort:         'date-desc',
     });
 
-    const res = await fetch(`${BASE_URL}/orders?${params}`, {
-      headers: { 'X-Api-Key': API_KEY, 'Content-Type': 'application/json' },
-    });
+    try {
+      const res = await fetch(`${BASE_URL}/orders?${params}`, {
+        headers: { 'X-Api-Key': API_KEY, 'Content-Type': 'application/json' },
+      });
 
-    if (!res.ok) break;
-    const data = await res.json();
-    const list = data?.data?.list || [];
-    if (list.length === 0) break;
+      if (!res.ok) break;
+      const data = await res.json();
+      const list = data?.data?.list || [];
+      if (list.length === 0) break;
 
-    allOrders = allOrders.concat(list);
+      allOrders = allOrders.concat(list);
 
-    const total = data.pagination?.total ?? data.data?.count ?? 0;
-    offset += limit;
-    if (offset >= total || list.length < limit) break;
+      const total = data.pagination?.total ?? 0;
+      if (allOrders.length >= total || list.length < limit) break;
 
-    // Rate limit safety
-    await new Promise(r => setTimeout(r, 250));
+      // Rate limit safety
+      await new Promise(r => setTimeout(r, 200));
+    } catch (e) {
+      break;
+    }
   }
 
   return allOrders;
@@ -56,80 +59,52 @@ function buildServiceStats(orders) {
   for (const order of orders) {
     const sid  = String(order.service_id || '');
     const name = order.service_name || 'Unknown';
-
     if (!sid) continue;
 
     if (!map[sid]) {
       map[sid] = {
-        id:        sid,
-        name,
-        completed: 0,
-        canceled:  0,
-        partial:   0,
-        fail:      0,
-        error:     0,
-        total:     0,
-        total_qty: 0,
+        id: sid, name,
+        completed: 0, canceled: 0, partial: 0,
+        fail: 0, error: 0, total: 0, total_qty: 0,
       };
     }
 
-    const s = map[sid];
-    s.total    += 1;
+    const s      = map[sid];
+    s.total     += 1;
     s.total_qty += Number(order.quantity) || 0;
 
     const status = (order.status || '').toLowerCase();
-    if (status === 'completed')             s.completed += 1;
-    else if (status === 'canceled')         s.canceled  += 1;
-    else if (status === 'partial')          s.partial   += 1;
-    else if (status === 'fail')             s.fail      += 1;
-    else if (status === 'error')            s.error     += 1;
+    if      (status === 'completed') s.completed += 1;
+    else if (status === 'canceled')  s.canceled  += 1;
+    else if (status === 'partial')   s.partial   += 1;
+    else if (status === 'fail')      s.fail      += 1;
+    else if (status === 'error')     s.error     += 1;
   }
 
-  // Calculate rates and score
   const services = Object.values(map).map(s => {
     const completion_rate = s.total > 0
-      ? parseFloat(((s.completed / s.total) * 100).toFixed(1))
-      : 0;
-
+      ? parseFloat(((s.completed / s.total) * 100).toFixed(1)) : 0;
     const cancel_rate = s.total > 0
-      ? parseFloat(((s.canceled / s.total) * 100).toFixed(1))
-      : 0;
-
+      ? parseFloat(((s.canceled / s.total) * 100).toFixed(1)) : 0;
     const fail_rate = s.total > 0
-      ? parseFloat((((s.fail + s.error) / s.total) * 100).toFixed(1))
-      : 0;
+      ? parseFloat((((s.fail + s.error) / s.total) * 100).toFixed(1)) : 0;
 
-    // Score: weighted — completion boosts, cancel/fail hurts
-    const score = Math.max(
-      0,
-      Math.min(
-        100,
-        Math.round(completion_rate - cancel_rate * 1.5 - fail_rate * 2)
-      )
-    );
+    const score = Math.max(0, Math.min(100,
+      Math.round(completion_rate - cancel_rate * 1.5 - fail_rate * 2)
+    ));
 
-    // Verified: completion >= 80% AND at least 5 orders AND cancel < 10%
     const verified = completion_rate >= 80 && s.total >= 5 && cancel_rate < 10;
 
     return {
-      id:              s.id,
-      name:            s.name,
-      completion_rate,
-      cancel_rate,
-      fail_rate,
-      score,
-      verified,
-      completed:       s.completed,
-      canceled:        s.canceled,
-      partial:         s.partial,
-      total:           s.total,
-      total_qty:       s.total_qty,
+      id: s.id, name: s.name,
+      completion_rate, cancel_rate, fail_rate,
+      score, verified,
+      completed: s.completed, canceled: s.canceled,
+      partial: s.partial, total: s.total, total_qty: s.total_qty,
     };
   });
 
-  // Sort by score desc by default
   services.sort((a, b) => b.score - a.score);
-
   return services;
 }
 
@@ -143,15 +118,13 @@ export default async function handler(req, res) {
   try {
     const { category, verified, id } = req.query;
 
-    const allOrders = await fetchAllOrders();
-    let services    = buildServiceStats(allOrders);
+    const orders  = await fetchRecentOrders();
+    let services  = buildServiceStats(orders);
 
-    // Filter by single service ID
     if (id) {
       services = services.filter(s => String(s.id) === String(id));
     }
 
-    // Filter by category (multi-keyword: "facebook followers")
     if (category) {
       const words = category.toLowerCase().split(/[\s+,]+/).filter(Boolean);
       services = services.filter(s =>
@@ -159,7 +132,6 @@ export default async function handler(req, res) {
       );
     }
 
-    // Filter verified only
     if (verified === 'true') {
       services = services.filter(s => s.verified);
     }
@@ -170,6 +142,7 @@ export default async function handler(req, res) {
       success:        true,
       period:         'last_90_days',
       generated_at:   new Date().toISOString(),
+      orders_analyzed: orders.length,
       total:          services.length,
       verified_count,
       services,
