@@ -130,10 +130,12 @@ export default async function handler(req, res) {
       reply: botReply.trim()
     });
 
-  } catch (err) {
+   } catch (err) {
     console.error('Chatbot error:', err.message);
+    
+    // ডিবাগিংয়ের জন্য আসল এরর মেসেজটি রিটার্ন করছি
     return res.status(200).json({
-      reply: "⚠️ Sorry, I am having trouble connecting to the server. Please try again later."
+      reply: `⚠️ Debug Error: ${err.message}` 
     });
   }
 }
