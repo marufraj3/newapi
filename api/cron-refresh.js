@@ -1,6 +1,8 @@
 // api/cron-refresh.js
-// Vercel Cron — প্রতি 12 ঘণ্টায় একবার analytics cache refresh করে
-// vercel.json এ cron config যোগ করতে হবে (নিচে দেওয়া আছে)
+import { fetchAllOrders, buildStats, kvSet } from './analytics.js'; // যদি একই ফাইলে রাখেন তাহলে এই লাইন লাগবে না
+
+const CACHE_KEY = 'analytics_v1';
+const CACHE_TTL = 12 * 60 * 60; // 12 hours
 
 export default async function handler(req, res) {
   // Vercel cron এর secret verify
@@ -10,23 +12,32 @@ export default async function handler(req, res) {
   }
 
   try {
-    // analytics endpoint কে force refresh করো
-    const base = process.env.VERCEL_URL
-      ? `https://${process.env.VERCEL_URL}`
-      : 'https://newapi-gamma-five.vercel.app';
+    console.log('Cron job started: Fetching fresh analytics...');
+    
+    // সরাসরি ডাটা ফেচ করুন, অন্য API কে কল করবেন না
+    const { orders, total_orders, total_pages } = await fetchAllOrders();
+    const { statusMap, services } = buildStats(orders);
 
-    const res2 = await fetch(`${base}/api/analytics?refresh=1`, {
-      signal: AbortSignal.timeout(55000), // 55s (Vercel cron max 60s)
-    });
+    const now = Date.now();
+    const payload = {
+      cached_at: new Date(now).toISOString(),
+      expires_at: new Date(now + CACHE_TTL * 1000).toISOString(),
+      total_orders,
+      total_pages,
+      status_map: statusMap,
+      services,
+    };
 
-    if (!res2.ok) throw new Error(`Analytics refresh failed: ${res2.status}`);
-    const data = await res2.json();
+    // KV তে ক্যাশ করে রাখুন
+    await kvSet(CACHE_KEY, payload, CACHE_TTL);
+
+    console.log(`Cron job success: Cached ${total_orders} orders.`);
 
     return res.status(200).json({
-      ok:           true,
+      ok: true,
       refreshed_at: new Date().toISOString(),
-      total_orders: data.total_orders,
-      services:     data.services?.length,
+      total_orders: total_orders,
+      services_count: services.length,
     });
 
   } catch (err) {
