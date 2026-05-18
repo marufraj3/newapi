@@ -30,7 +30,7 @@ async function kvSet(key, value, ttl) {
 async function fetchAllOrders() {
   const now            = Math.floor(Date.now() / 1000);
   const ninetyDaysAgo = now - 90 * 24 * 60 * 60;
-  const limit          = 10000; // নিরাপদ লিমিট (১০০০-এর বেশি দিলে ৪০০ এরর আসতে পারে)
+  const limit          = 1000; // নিরাপদ লিমিট (১০০০-এর বেশি দিলে ৪০০ এরর আসতে পারে)
 
   // Page 0 → প্রথম ১০,০০০ ডাটা এবং মোট পেজ জানা
   const firstRes = await fetch(`${BASE_URL}/orders?` + new URLSearchParams({
