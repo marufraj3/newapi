@@ -27,49 +27,57 @@ async function kvSet(key, value, ttl) {
 }
 
 // ── Fetch all orders with Correct Pagination ───────────────────────────────
+// ── Fetch all orders with Dynamic Pagination ───────────────────────────────
 async function fetchAllOrders() {
   const now            = Math.floor(Date.now() / 1000);
   const ninetyDaysAgo = now - 90 * 24 * 60 * 60;
-  const limit          = 1000; // নিরাপদ লিমিট (১০০০-এর বেশি দিলে ৪০০ এরর আসতে পারে)
+  const limit          = 1000;
+  let allOrders        = [];
+  let offset           = 0;
+  let hasMore          = true;
+  let totalPagesFetched = 0;
 
-  // Page 0 → প্রথম ১০,০০০ ডাটা এবং মোট পেজ জানা
-  const firstRes = await fetch(`${BASE_URL}/orders?` + new URLSearchParams({
-    created_from: ninetyDaysAgo, created_to: now, limit, offset: 0, sort: 'date-desc',
-  }), { headers: { 'X-Api-Key': API_KEY } });
+  while (hasMore) {
+    try {
+      const res = await fetch(`${BASE_URL}/orders?` + new URLSearchParams({
+        created_from: ninetyDaysAgo, 
+        created_to: now, 
+        limit, 
+        offset, 
+        sort: 'date-desc',
+      }), { headers: { 'X-Api-Key': API_KEY } });
 
-  if (!firstRes.ok) {
-    const errText = await firstRes.text(); 
-    throw new Error(`API Error: ${firstRes.status} - ${errText}`);
-  }
-  
-  const firstData  = await firstRes.json();
-  const total      = firstData?.pagination?.total ?? 0;
-  const totalPages = Math.ceil(total / limit);
-  let   allOrders  = firstData?.data?.list || [];
+      if (!res.ok) {
+        console.error(`API Error at offset ${offset}: ${res.status}`);
+        break; // যদি এরর আসে লুপ ব্রেক করবে, কিন্তু যতটুকু এসেছে সেটা সেভ করবে
+      }
 
-  // Remaining pages — 3 at a time (Rate limit safe)
-  const BATCH = 3;
-  for (let page = 1; page < totalPages; page += BATCH) {
-    const batch = Array.from({ length: Math.min(BATCH, totalPages - page) }, (_, i) => page + i);
-    
-    const results = await Promise.allSettled(
-      batch.map(p =>
-        fetch(`${BASE_URL}/orders?` + new URLSearchParams({
-          created_from: ninetyDaysAgo, created_to: now,
-          limit, offset: p * limit, sort: 'date-desc',
-        }), { headers: { 'X-Api-Key': API_KEY } })
-        .then(r => r.json())
-        .then(d => d?.data?.list || [])
-      )
-    );
-    
-    for (const r of results) {
-      if (r.status === 'fulfilled') allOrders = allOrders.concat(r.value);
+      const data = await res.json();
+      const orders = data?.data?.list || [];
+      
+      if (orders.length > 0) {
+        allOrders = allOrders.concat(orders);
+        offset += orders.length; // যতগুলো অর্ডার এসেছে, অফসেট ততটা বাড়বে
+        totalPagesFetched++;
+        
+        // Rate limit এড়াতে ৫০০মিসি ওয়েট (এবং ৫টি পেজ পর একটু বেশি ওয়েট)
+        if (totalPagesFetched % 5 === 0) {
+          await new Promise(r => setTimeout(r, 1000)); 
+        } else {
+          await new Promise(r => setTimeout(r, 400));
+        }
+      } else {
+        // যখন আর কোনো অর্ডার পাওয়া যাচ্ছে না, লুপ বন্ধ করে দিবে
+        hasMore = false; 
+      }
+
+    } catch (err) {
+      console.error('Fetch loop error:', err.message);
+      break;
     }
-    await new Promise(r => setTimeout(r, 500)); // 500ms delay to prevent rate limit
   }
 
-  return { orders: allOrders, total_orders: total };
+  return { orders: allOrders, total_orders: allOrders.length };
 }
 
 // ── Build Stats ───────────────────────────────────────────────────────────────
