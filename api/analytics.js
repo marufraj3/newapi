@@ -40,7 +40,7 @@ async function fetchAllOrders() {
   const ninetyDaysAgo = now - 90 * 24 * 60 * 60;
   const limit          = 1000;
 
-  // Page 1 → total জানো
+  // Page 0 (প্রথম ১০০০টি ডাটা) → total জানো
   const firstRes = await fetch(`${BASE_URL}/orders?` + new URLSearchParams({
     created_from: ninetyDaysAgo, created_to: now, limit, offset: 0, sort: 'date-desc',
   }), { headers: { 'X-Api-Key': API_KEY } });
@@ -49,22 +49,26 @@ async function fetchAllOrders() {
   const firstData  = await firstRes.json();
   const total      = firstData?.pagination?.total ?? 0;
   const totalPages = Math.ceil(total / limit);
-  let   allOrders  = firstData?.data?.list || [];
+  let   allOrders  = firstData?.data?.list || []; // প্রথম ১০০০টি ডাটা এখানে সেভ হলো
 
-  // Remaining pages — 5 at a time (rate limit safe)
+  // Remaining pages (Page 1 থেকে শেষ পর্যন্ত) — 5 at a time (rate limit safe)
   const BATCH = 5;
-  for (let p = 1; p < totalPages; p += BATCH) {
-    const batch = Array.from({ length: Math.min(BATCH, totalPages - p) }, (_, i) => p + i);
+  for (let page = 1; page < totalPages; page += BATCH) {
+    const batch = Array.from({ length: Math.min(BATCH, totalPages - page) }, (_, i) => page + i);
+    
     const results = await Promise.allSettled(
-      batch.map(page =>
+      batch.map(p =>
         fetch(`${BASE_URL}/orders?` + new URLSearchParams({
           created_from: ninetyDaysAgo, created_to: now,
-          limit, offset: page * limit, sort: 'date-desc',
+          limit, 
+          offset: p * limit, // এখানে p=1 এর জন্য offset 1000 হবে, p=2 এর জন্য 2000
+          sort: 'date-desc',
         }), { headers: { 'X-Api-Key': API_KEY } })
         .then(r => r.json())
         .then(d => d?.data?.list || [])
       )
     );
+    
     for (const r of results) {
       if (r.status === 'fulfilled') allOrders = allOrders.concat(r.value);
     }
