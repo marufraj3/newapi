@@ -1,112 +1,139 @@
 // api/chatbot.js
-const KV_URL    = process.env.KV_REST_API_URL;
-const KV_TOKEN  = process.env.KV_REST_API_TOKEN;
+// এটি সরাসরি BulkProvider API থেকে ডাটা ফেচ করে, তাই KV ক্যাশের দরকার নেই
 
-// আপনার analytics কোডে যে কী ব্যবহার করা হয়েছে সেটি দিন (analytics_v3 বা analytics_v4)
-const CACHE_KEY = 'analytics_v4'; 
+const BASE_URL = "https://mothersmm.com/adminapi/v2";
+const API_KEY  = process.env.BULKPROVIDER_API_KEY;
 
-async function kvGet(key) {
-  try {
-    const res = await fetch(`${KV_URL}/get/${key}`, {
-      headers: { Authorization: `Bearer ${KV_TOKEN}` },
-    });
-    if (!res.ok) return null;
-    const { result } = await res.json();
-    return result ? JSON.parse(result) : null;
-  } catch { return null; }
+async function fetchOrdersForService(serviceId) {
+  const now = Math.floor(Date.now() / 1000);
+  const thirtyDaysAgo = now - 30 * 24 * 60 * 60; // স্পিডের জন্য শেষ ৩০ দিনের ডাটা চেক করা হচ্ছে
+
+  const params = new URLSearchParams({
+    created_from: thirtyDaysAgo,
+    created_to: now,
+    limit: 500, // ৫০০ অর্ডার দিয়েই ভালো স্ট্যাটাস পাওয়া যায়
+    service_ids: serviceId,
+    sort: 'date-desc',
+  });
+
+  const res = await fetch(`${BASE_URL}/orders?${params}`, {
+    headers: { 'X-Api-Key': API_KEY, 'Content-Type': 'application/json' },
+  });
+
+  if (!res.ok) return [];
+  const json = await res.json();
+  return json?.data?.list || [];
+}
+
+function buildServiceStats(orders) {
+  if (orders.length === 0) return null;
+
+  const s = {
+    id: orders[0].service_id,
+    name: orders[0].service_name || 'Unknown',
+    completed: 0, canceled: 0, partial: 0, in_progress: 0, processing: 0,
+    total: 0, total_qty: 0,
+  };
+
+  for (const order of orders) {
+    s.total += 1;
+    s.total_qty += Number(order.quantity) || 0;
+
+    const status = (order.status || '').toLowerCase();
+    if (status === 'completed') s.completed += 1;
+    else if (status === 'canceled') s.canceled += 1;
+    else if (status === 'partial') s.partial += 1;
+    else if (status === 'in_progress' || status === 'pending') s.in_progress += 1;
+    else if (status === 'processing') s.processing += 1;
+  }
+
+  s.completion_rate = s.total > 0 ? parseFloat(((s.completed / s.total) * 100).toFixed(1)) : 0;
+  s.cancel_rate = s.total > 0 ? parseFloat(((s.canceled / s.total) * 100).toFixed(1)) : 0;
+  s.processing_rate = s.total > 0 ? parseFloat(((s.processing / s.total) * 100).toFixed(1)) : 0;
+  
+  s.score = Math.max(0, Math.min(100, Math.round(s.completion_rate - s.cancel_rate * 1.5)));
+  s.verified = s.completion_rate >= 80 && s.total >= 5 && s.cancel_rate < 10;
+
+  return s;
 }
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  // ১. চাটবট থেকে কীওয়ার্ড নেওয়া (e.g., /api/chatbot?q=facebook+likes)
   const query = (req.query.q || '').trim().toLowerCase();
   if (!query) {
     return res.status(200).json({
-      success: false,
       reply: "Please type a service name or keyword. Example: 'facebook likes' or 'instagram followers'."
     });
   }
 
-  // ২. KV থেকে ক্যাশড অ্যানালিটিক্স ডাটা আনা (ইনস্ট্যান্ট লোড)
-  const cached = await kvGet(CACHE_KEY);
-  if (!cached || !cached.services || cached.services.length === 0) {
-    return res.status(200).json({
-      success: false,
-      reply: "Service analytics data is currently updating. Please try again in a few minutes."
+  try {
+    // ১. প্রথমে BulkProvider এর সার্ভিস লিস্ট থেকে ম্যাচিং সার্ভিসগুলোর ID বের করা
+    const servicesRes = await fetch(`${BASE_URL}/services`, {
+      headers: { 'X-Api-Key': API_KEY, 'Content-Type': 'application/json' }
     });
-  }
+    
+    if (!servicesRes.ok) throw new Error('Failed to fetch service list');
+    
+    const servicesData = await servicesRes.json();
+    const allServices = servicesData?.data || []; // API এর ডাটা স্ট্রাকচার অনুযায়ী বসান
 
-  // ৩. কীওয়ার্ড ম্যাচিং (Multi-keyword support)
-  // "facebook like" লিখলে নামের মধ্যে "facebook" এবং "like" দুটোই থাকতে হবে
-  const words = query.split(/\s+/).filter(Boolean);
-  let matches = cached.services.filter(s =>
-    words.every(w => s.name.toLowerCase().includes(w) || s.sid.includes(w))
-  );
+    // কীওয়ার্ড ম্যাচিং
+    const words = query.split(/\s+/).filter(Boolean);
+    const matchedServices = allServices.filter(s =>
+      words.every(w => s.name.toLowerCase().includes(w))
+    ).slice(0, 3); // চাটবটে সর্বোচ্চ সেরা ৩টি সার্ভিসের ডাটা ফেচ করব (স্পিডের জন্য)
 
-  // ৪. সার্চ রেজাল্ট না পাওয়ার ফলব্যাক (Smart Suggestion)
-  if (matches.length === 0) {
-    const partialMatches = cached.services.filter(s =>
-      words.some(w => s.name.toLowerCase().includes(w) || s.sid.includes(w))
-    ).slice(0, 3);
+    if (matchedServices.length === 0) {
+      return res.status(200).json({
+        reply: `❌ No services found matching '${query}'. Please check spelling or try a different keyword.`
+      });
+    }
 
-    let suggestionText = partialMatches.length > 0 
-      ? `No exact match for '${query}'. Did you mean: \n${partialMatches.map(s => `- ${s.name.substring(0, 40)} (ID: ${s.sid})`).join('\n')}?`
-      : `No services found matching '${query}'.`;
+    // ২. ম্যাচ করা সার্ভিসগুলোর অর্ডার হিস্ট্রি ফেচ করা (প্যারালালে)
+    const statsPromises = matchedServices.map(s => fetchOrdersForService(s.service || s.id));
+    const ordersArrays = await Promise.all(statsPromises);
 
-    return res.status(200).json({
-      success: true,
-      query: query,
-      total_matches: 0,
-      services: [],
-      reply: suggestionText
-    });
-  }
+    // ৩. স্ট্যাটাস বিল্ড করা
+    const results = ordersArrays.map(orders => buildServiceStats(orders)).filter(Boolean);
 
-  // ৫. সেরা সার্ভিসগুলো ফিল্টার করা (ভেরিফায়েড এবং স্কোর অনুযায়ী সর্ট)
-  const topMatches = matches
-    .sort((a, b) => {
+    if (results.length === 0) {
+      return res.status(200).json({
+        reply: `⚠️ Found services for '${query}', but no recent order data available to verify speed.`
+      });
+    }
+
+    // ৪. সেরা সার্ভিসগুলো সর্ট করা
+    results.sort((a, b) => {
       if (a.verified && !b.verified) return -1;
       if (!a.verified && b.verified) return 1;
       return b.score - a.score;
-    })
-    .slice(0, 5); // চাটবটে সর্বোচ্চ ৫টি সেরা সার্ভিস দেখানো
+    });
 
-  // ৬. চাটবটের জন্য সুন্দর টেক্সট রেসপন্স তৈরি করা
-  let botReply = `🔍 Top results for '${query}':\n\n`;
-  
-  topMatches.forEach((s, i) => {
-    const statusEmoji = s.verified ? '✅' : '⚠️';
-    // প্রসেসিং রেটের উপর ভিত্তি করে স্পিড ট্যাগ তৈরি
-    const speedTag = s.processing_rate <= 5 ? '🚀 Instant' : s.processing_rate <= 15 ? '⚡ Fast' : '🐢 Average';
+    // ৫. চাটবটের জন্য রেসপন্স তৈরি করা
+    let botReply = `🔍 Top results for '${query}':\n\n`;
     
-    botReply += `${i + 1}. ${statusEmoji} ${s.name.substring(0, 45)}\n`;
-    botReply += `   🆔 ID: ${s.sid} | ⚡ Speed: ${speedTag}\n`;
-    botReply += `   📊 Success: ${s.completion_rate}% | 📦 Orders: ${s.total}\n\n`;
-  });
+    results.forEach((s, i) => {
+      const statusEmoji = s.verified ? '✅' : '⚠️';
+      const speedTag = s.processing_rate <= 10 ? '🚀 Fast/Instant' : s.processing_rate <= 25 ? '⚡ Average' : '🐢 Slow';
+      
+      botReply += `${i + 1}. ${statusEmoji} ${s.name.substring(0, 45)}\n`;
+      botReply += `   🆔 ID: ${s.id} | ⚡ Speed: ${speedTag}\n`;
+      botReply += `   📊 Success: ${s.completion_rate}% | Cancel: ${s.cancel_rate}%\n`;
+      botReply += `   📦 Recent Orders: ${s.total}\n\n`;
+    });
 
-  if (matches.length > 5) {
-    botReply += `_...and ${matches.length - 5} more services available._\n`;
+    botReply += `💡 Tip: Use the Service ID (🆔) to place your order!`;
+
+    return res.status(200).json({
+      reply: botReply.trim()
+    });
+
+  } catch (err) {
+    console.error('Chatbot error:', err.message);
+    return res.status(200).json({
+      reply: "⚠️ Sorry, I am having trouble connecting to the server. Please try again later."
+    });
   }
-  
-  botReply += `\n💡 Tip: Use the Service ID (🆔) to place your order on the website!`;
-
-  // ৭. JSON রেসপন্স পাঠানো
-  return res.status(200).json({
-    success: true,
-    query: query,
-    total_matches: matches.length,
-    services: topMatches.map(s => ({
-      id: s.sid,
-      name: s.name,
-      completion_rate: s.completion_rate,
-      processing_rate: s.processing_rate,
-      cancel_rate: s.canceled_rate,
-      total_orders: s.total,
-      verified: s.verified,
-      score: s.score
-    })),
-    reply: botReply.trim() // এটি সরাসরি মেসেঞ্জারে পাঠাতে পারবেন
-  });
 }
