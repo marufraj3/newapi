@@ -115,8 +115,19 @@ export default async function handler(req, res) {
 
   if (!forceRefresh) {
     const cached = await kvGet(CACHE_KEY);
+    
     if (cached) {
-      return res.status(200).json({ source: 'cache', ...cached });
+      // চেক করছি ক্যাশ করা ডাটা ১২ ঘণ্টার বেশি পুরনো কি না
+      const cachedTime = new Date(cached.cached_at).getTime();
+      const twelveHoursInMs = 12 * 60 * 60 * 1000;
+      const isExpired = (Date.now() - cachedTime) > twelveHoursInMs;
+
+      // যদি ১২ ঘণ্টার কম হয়, তবে সরাসরি ক্যাশ ডাটা দিয়ে দিবে (খুব ফাস্ট)
+      if (!isExpired) {
+        return res.status(200).json({ source: 'cache', ...cached });
+      }
+      
+      // আর যদি ১২ ঘণ্টার বেশি হয়ে যায়, তবে কোড নিচে গিয়ে নতুন ডাটা ফেচ করবে
     }
   }
 
@@ -131,10 +142,14 @@ export default async function handler(req, res) {
       services
     };
 
-    await kvSet(CACHE_KEY, payload, CACHE_TTL);
+    await kvSet(CACHE_KEY, payload, CACHE_TTL); // KV তে ২৪ ঘণ্টার জন্য সেভ হবে, কিন্তু কোড ১২ ঘণ্টা পর রিফ্রেশ করবে
     return res.status(200).json({ source: 'fresh', ...payload });
 
   } catch (err) {
+    // যদি ফেচ করতে এরর আসে, কিন্তু পুরনো ক্যাশ থাকে, তবে পুরনো ডাটা দেখাবে
+    const cached = await kvGet(CACHE_KEY);
+    if (cached) return res.status(200).json({ source: 'cache-fallback', ...cached });
+    
     return res.status(500).json({ error: err.message });
   }
 }
