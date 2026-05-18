@@ -3,7 +3,7 @@ const KV_URL    = process.env.KV_REST_API_URL;
 const KV_TOKEN  = process.env.KV_REST_API_TOKEN;
 
 // আপনার analytics কোডে যে কী ব্যবহার করা হয়েছে সেটি দিন (analytics_v3 বা analytics_v4)
-const CACHE_KEY = 'analytics_final_v1'; 
+const CACHE_KEY = 'analytics_v4'; 
 
 async function kvGet(key) {
   try {
