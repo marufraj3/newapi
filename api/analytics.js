@@ -3,8 +3,8 @@ const BASE_URL  = "https://mothersmm.com/adminapi/v2";
 const API_KEY   = process.env.BULKPROVIDER_API_KEY;
 const KV_URL    = process.env.KV_REST_API_URL;
 const KV_TOKEN  = process.env.KV_REST_API_TOKEN;
-const CACHE_KEY = 'analytics_v2'; // নতুন ক্যাশ কী
-const CACHE_TTL = 12 * 60 * 60;  // 12 hours
+const CACHE_KEY = 'analytics_v3'; // নতুন ক্যাশ কী (পুরনো ভুল ডাটা বাদ দেওয়ার জন্য)
+const CACHE_TTL = 24 * 60 * 60;  // 24 hours (কোডে লজিক দিয়ে 12 ঘণ্টা কন্ট্রোল করব)
 
 // KV Helpers
 async function kvGet(key) {
@@ -26,29 +26,53 @@ async function kvSet(key, value, ttl) {
   } catch (e) { console.error('KV set error:', e.message); }
 }
 
-// Fetch all 90 days data at once (No pagination loop needed if API supports date range)
+// ── Fetch all orders with Correct Pagination ───────────────────────────────
 async function fetchAllOrders() {
-  const now = Math.floor(Date.now() / 1000);
+  const now            = Math.floor(Date.now() / 1000);
   const ninetyDaysAgo = now - 90 * 24 * 60 * 60;
-  const limit = 50000; // Try fetching max at once to avoid slow loops
+  const limit          = 10000; // নিরাপদ লিমিট (১০০০-এর বেশি দিলে ৪০০ এরর আসতে পারে)
 
-  const res = await fetch(`${BASE_URL}/orders?` + new URLSearchParams({
-    created_from: ninetyDaysAgo, 
-    created_to: now, 
-    limit: limit, 
-    sort: 'date-desc'
+  // Page 0 → প্রথম ১০,০০০ ডাটা এবং মোট পেজ জানা
+  const firstRes = await fetch(`${BASE_URL}/orders?` + new URLSearchParams({
+    created_from: ninetyDaysAgo, created_to: now, limit, offset: 0, sort: 'date-desc',
   }), { headers: { 'X-Api-Key': API_KEY } });
 
-  if (!res.ok) throw new Error(`API Error: ${res.status}`);
-  const data = await res.json();
+  if (!firstRes.ok) {
+    const errText = await firstRes.text(); 
+    throw new Error(`API Error: ${firstRes.status} - ${errText}`);
+  }
   
-  return {
-    orders: data?.data?.list || [],
-    total_orders: data?.pagination?.total || 0
-  };
+  const firstData  = await firstRes.json();
+  const total      = firstData?.pagination?.total ?? 0;
+  const totalPages = Math.ceil(total / limit);
+  let   allOrders  = firstData?.data?.list || [];
+
+  // Remaining pages — 3 at a time (Rate limit safe)
+  const BATCH = 3;
+  for (let page = 1; page < totalPages; page += BATCH) {
+    const batch = Array.from({ length: Math.min(BATCH, totalPages - page) }, (_, i) => page + i);
+    
+    const results = await Promise.allSettled(
+      batch.map(p =>
+        fetch(`${BASE_URL}/orders?` + new URLSearchParams({
+          created_from: ninetyDaysAgo, created_to: now,
+          limit, offset: p * limit, sort: 'date-desc',
+        }), { headers: { 'X-Api-Key': API_KEY } })
+        .then(r => r.json())
+        .then(d => d?.data?.list || [])
+      )
+    );
+    
+    for (const r of results) {
+      if (r.status === 'fulfilled') allOrders = allOrders.concat(r.value);
+    }
+    await new Promise(r => setTimeout(r, 500)); // 500ms delay to prevent rate limit
+  }
+
+  return { orders: allOrders, total_orders: total };
 }
 
-// Build Stats (Exactly matching your frontend logic)
+// ── Build Stats ───────────────────────────────────────────────────────────────
 function buildStats(orders) {
   const statusMap = { completed: 0, in_progress: 0, processing: 0, canceled: 0 };
   const svcMap = {};
@@ -99,14 +123,14 @@ function buildStats(orders) {
 
     s.verified = s.completion_rate >= 80 && s.processing_rate <= 15 && !recentHasProcessing;
     
-    // KV-তে সেভ করার আগে raw orders ডিলিট দিচ্ছি (কারণ এটা ডাটাবেসের সাইজ অনেক বাড়িয়ে দেবে, আর ফ্রন্টএন্ডেও এটা লাগবে না)
-    delete s.orders; 
+    delete s.orders; // Save space in KV
     return s;
   }).sort((a, b) => b.score - a.score);
 
   return { statusMap, services };
 }
 
+// ── Handler with 12-hour Smart Logic ─────────────────────────────────────────
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   if (req.method === 'OPTIONS') return res.status(200).end();
@@ -117,20 +141,18 @@ export default async function handler(req, res) {
     const cached = await kvGet(CACHE_KEY);
     
     if (cached) {
-      // চেক করছি ক্যাশ করা ডাটা ১২ ঘণ্টার বেশি পুরনো কি না
       const cachedTime = new Date(cached.cached_at).getTime();
       const twelveHoursInMs = 12 * 60 * 60 * 1000;
       const isExpired = (Date.now() - cachedTime) > twelveHoursInMs;
 
-      // যদি ১২ ঘণ্টার কম হয়, তবে সরাসরি ক্যাশ ডাটা দিয়ে দিবে (খুব ফাস্ট)
+      // ডাটা ১২ ঘণ্টার কম পুরনো হলে সরাসরি ক্যাশ থেকে দিয়ে দিবে (খুব ফাস্ট)
       if (!isExpired) {
         return res.status(200).json({ source: 'cache', ...cached });
       }
-      
-      // আর যদি ১২ ঘণ্টার বেশি হয়ে যায়, তবে কোড নিচে গিয়ে নতুন ডাটা ফেচ করবে
     }
   }
 
+  // ১২ ঘণ্টা পার হয়ে গেলে বা ?refresh=1 হলে নতুন ডাটা ফেচ করবে
   try {
     const { orders, total_orders } = await fetchAllOrders();
     const { statusMap, services } = buildStats(orders);
@@ -142,11 +164,13 @@ export default async function handler(req, res) {
       services
     };
 
-    await kvSet(CACHE_KEY, payload, CACHE_TTL); // KV তে ২৪ ঘণ্টার জন্য সেভ হবে, কিন্তু কোড ১২ ঘণ্টা পর রিফ্রেশ করবে
+    await kvSet(CACHE_KEY, payload, CACHE_TTL);
     return res.status(200).json({ source: 'fresh', ...payload });
 
   } catch (err) {
-    // যদি ফেচ করতে এরর আসে, কিন্তু পুরনো ক্যাশ থাকে, তবে পুরনো ডাটা দেখাবে
+    console.error('Analytics error:', err.message);
+    
+    // নতুন ডাটা ফেচ করতে এরর আসলে, পুরনো ক্যাশ ডাটা যদি থাকে তাহলে সেটাই দেখাবে
     const cached = await kvGet(CACHE_KEY);
     if (cached) return res.status(200).json({ source: 'cache-fallback', ...cached });
     
