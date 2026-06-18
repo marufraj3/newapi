@@ -1,13 +1,8 @@
 {
-  "name": "orders-api",
+  "name": "smmgen-chatbot",
   "version": "1.0.0",
-  "description": "BulkProvider Orders API - Last 90 Days with Stats",
-  "main": "index.js",
-  "scripts": {
-    "dev": "vercel dev",
-    "deploy": "vercel --prod"
-  },
+  "description": "AI Chatbot Widget with SMM service analytics",
   "dependencies": {
-    "node-fetch": "^3.3.2"
+    "@vercel/kv": "^1.0.0"
   }
 }
